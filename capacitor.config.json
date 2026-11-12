@@ -1,8 +1,0 @@
-{
-  "appId": "com.shodh.sangrah",
-  "appName": "Shodh Sangrah",
-  "webDir": "www",
-  "android": {
-    "backgroundColor": "#111826"
-  }
-}
