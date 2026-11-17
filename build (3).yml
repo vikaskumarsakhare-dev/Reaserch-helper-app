@@ -1,0 +1,110 @@
+name: Build APK v2.0
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install packages
+        run: npm install
+
+      - name: Optional packages (Hindi font, share-into-app)
+        run: |
+          npm install @expo-google-fonts/noto-sans-devanagari || echo "font package not installed"
+
+      - name: Share-into-app plugin
+        id: si
+        continue-on-error: true
+        run: npm install send-intent@^6.0.0
+
+      - name: Copy libraries into the app
+        run: |
+          mkdir -p www/lib
+          cp node_modules/xlsx/dist/xlsx.full.min.js www/lib/
+          cp node_modules/pdfjs-dist/build/pdf.min.js www/lib/
+          cp node_modules/pdfjs-dist/build/pdf.worker.min.js www/lib/
+          cp node_modules/mammoth/mammoth.browser.min.js www/lib/
+          cp node_modules/pdf-lib/dist/pdf-lib.min.js www/lib/
+          FK=$(find node_modules/@pdf-lib/fontkit/dist -name "fontkit.umd.min.js" | head -1)
+          if [ -z "$FK" ]; then FK=$(find node_modules/@pdf-lib/fontkit/dist -name "fontkit.umd.js" | head -1); fi
+          if [ -n "$FK" ]; then cp "$FK" www/lib/fontkit.umd.min.js; else echo "fontkit not found"; fi
+          REG=$(find node_modules/@expo-google-fonts/noto-sans-devanagari -iname "*400Regular.ttf" 2>/dev/null | head -1)
+          BLD=$(find node_modules/@expo-google-fonts/noto-sans-devanagari -iname "*700Bold.ttf" 2>/dev/null | head -1)
+          if [ -n "$REG" ]; then cp "$REG" www/lib/font-regular.ttf; else echo "regular font not found"; fi
+          if [ -n "$BLD" ]; then cp "$BLD" www/lib/font-bold.ttf; else echo "bold font not found"; fi
+          ls -la www/lib
+
+      - name: Create Android project
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Share-into-app setup
+        if: steps.si.outcome == 'success'
+        continue-on-error: true
+        run: python3 tools/share_setup.py
+
+      - name: App name and logo
+        run: |
+          F=android/app/src/main/res/values/strings.xml
+          sed -i 's|<string name="app_name">.*</string>|<string name="app_name">रिसर्च संग्रह</string>|' $F
+          sed -i 's|<string name="title_activity_main">.*</string>|<string name="title_activity_main">रिसर्च संग्रह</string>|' $F
+          pip install pillow
+          python tools/make_icon.py android/app/src/main/res
+
+      - name: Keep the same signing key (so updates install over the old app)
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: debug-keystore-v1
+
+      - name: Build APK
+        id: b1
+        continue-on-error: true
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: Build again without share-into-app (only if the first build failed)
+        if: steps.b1.outcome == 'failure'
+        run: |
+          [ -f android/app/src/main/AndroidManifest.xml.bak ] && cp android/app/src/main/AndroidManifest.xml.bak android/app/src/main/AndroidManifest.xml || true
+          [ -f android/app/src/main/java/com/shodh/sangrah/MainActivity.java.bak ] && cp android/app/src/main/java/com/shodh/sangrah/MainActivity.java.bak android/app/src/main/java/com/shodh/sangrah/MainActivity.java || true
+          npm uninstall send-intent || true
+          npx cap sync android
+          cd android && ./gradlew assembleDebug
+
+      - name: Save APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-sangrah-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish download link (Releases)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Research Sangrah v2.0 build ${{ github.run_number }}
+          body: "Share-into-app: ${{ steps.b1.outcome == 'success' && steps.si.outcome == 'success' && 'ON' || 'OFF (fallback build)' }}"
+          files: android/app/build/outputs/apk/debug/app-debug.apk
